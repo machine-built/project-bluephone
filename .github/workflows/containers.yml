@@ -1,5 +1,7 @@
 name: containers
 on:
+  push:
+    branches: [main]
   workflow_call:
     inputs:
       fedora_branch:
@@ -121,6 +123,6 @@ jobs:
       device: ${{ matrix.device }}
       desktop: ${{ matrix.desktop }}
       tag: ${{ inputs.target_tag_override && inputs.target_tag_override || needs.config.outputs.target_tag }}
-      rechunker: ${{ inputs.rechunker }}
+      rechunker: ${{ inputs.rechunker || 'rpm-ostree' }}
       latest: ${{ needs.config.outputs.latest }}
       expires: ${{ needs.config.outputs.expires }}

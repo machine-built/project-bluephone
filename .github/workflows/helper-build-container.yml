@@ -42,7 +42,7 @@ jobs:
       packages: write
     env:
       SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+      COSIGN_PASSWORD: ""
     steps:
       - uses: actions/checkout@v6
 
