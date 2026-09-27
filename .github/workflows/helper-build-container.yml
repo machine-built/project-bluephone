@@ -41,7 +41,7 @@ jobs:
     permissions:
       packages: write
     env:
-      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      SIGNING_KEY: ${{ secrets.SIGNING_SECRET }}
       COSIGN_PASSWORD: ""
     steps:
       - uses: actions/checkout@v6
