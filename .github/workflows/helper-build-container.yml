@@ -1,0 +1,153 @@
+on:
+  workflow_call:
+    inputs:
+      # container's base image
+      fedora_branch:
+        required: true
+        type: string
+
+      # image to build
+      registry:
+        required: true
+        type: string
+      device:
+        required: true
+        type: string
+      desktop:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+
+      # misc parameters
+      latest:
+        required: false
+        type: string
+        default: ''
+      expires:
+        required: false
+        type: string
+        default: ''
+      rechunker:
+        required: false
+        type: string
+        default: 'rpm-ostree'
+
+jobs:
+  build:
+    name: ${{ inputs.device }}-${{ inputs.desktop }}
+    runs-on: ubuntu-26.04-arm
+    permissions:
+      packages: write
+    env:
+      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get device config
+        id: conf
+        shell: bash
+        run: |
+          cat 'devices/${{ inputs.device }}/build-aux/device.conf' >> $GITHUB_OUTPUT
+
+      - name: Prepare environment
+        env:
+          INPUT_REGISTRY: ${{ inputs.registry }}
+          REGISTRY_USERNAME: ${{ vars.REGISTRY_USERNAME || github.repository_owner }}
+        run: |
+          echo "REGISTRY_USERNAME=${REGISTRY_USERNAME,,}" >> ${GITHUB_ENV}
+
+          if [ -z "${{ steps.conf.outputs.device_variant }}" ]; then
+            echo "PB_TAG=${{ inputs.tag }}" >> .env
+            echo "TARGET_IMAGE_NAME=${{ inputs.device }}-${{ inputs.desktop }}" >> $GITHUB_ENV
+          else
+            pb_tag="${{ inputs.tag }}-${{ steps.conf.outputs.device_variant }}"
+            fallback_tag="${{ inputs.fedora_branch }}-${{ steps.conf.outputs.device_variant }}"
+            target_image_name="${{ steps.conf.outputs.device_base }}-${{ inputs.desktop }}"
+
+            echo "PB_TAG=$pb_tag" >> .env
+            echo "PB_FULL_IMAGE=${INPUT_REGISTRY,,}/${target_image_name}:${pb_tag}" >> .env
+            echo "PB_FALLBACK_IMAGE=${INPUT_REGISTRY,,}/${target_image_name}:${fallback_tag}" >> .env
+            echo "TARGET_IMAGE_NAME=$target_image_name" >> $GITHUB_ENV
+          fi
+
+          cat >> .env << EOF
+          PB_BRANCH=${{ inputs.fedora_branch }}
+          PB_DEVICE=${{ inputs.device }}
+          PB_DESKTOP=${{ inputs.desktop }}
+          PB_REGISTRY=${INPUT_REGISTRY,,}
+          PB_EXPIRES_AFTER=${{ inputs.expires && '1w' || '' }}
+          PB_RECHUNK_SUFFIX=-build
+          EOF
+
+          cat .env >> $GITHUB_ENV
+
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: '1.46.0'
+
+      - name: Pull
+        run: sudo --preserve-env=PATH $(which just) pull
+
+      - name: Build
+        if: ${{ inputs.rechunker == 'rpm-ostree' }}
+        run: sudo --preserve-env=PATH $(which just) build
+
+      - name: Rechunk
+        if: ${{ inputs.rechunker == 'rpm-ostree' }}
+        run: sudo --preserve-env=PATH $(which just) rechunk
+
+      - name: Build & rechunk
+        if: ${{ inputs.rechunker == 'chunkah' }}
+        run: sudo --preserve-env=PATH $(which just) build-chunkah
+
+      - name: Install Cosign
+        if: ${{ env.SIGNING_KEY != '' }}
+        uses: sigstore/cosign-installer@v4.1.1
+
+      - name: Login to registry
+        env:
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          sudo podman login --username $username --password $password $PB_REGISTRY
+          echo "$password" | docker login -u $username --password-stdin $PB_REGISTRY # for cosign
+
+      - name: Push to registry
+        id: push
+        run: |
+          # retry 3 times
+          function push {
+            img=$1
+
+            n=0
+            until [ "$n" -ge 3 ]; do
+              sudo podman push --digestfile=/tmp/digestfile $img && break
+              n=$((n+1))
+              sleep 10
+            done
+
+            if [ "$n" -ge 3 ]; then
+              exit 1
+            fi
+          }
+
+          # HACK: push twice as a workaround to push rechunk annotations
+          push "$PB_REGISTRY/$TARGET_IMAGE_NAME:$PB_TAG"
+          push "$PB_REGISTRY/$TARGET_IMAGE_NAME:$PB_TAG"
+
+          echo "digest=$(< /tmp/digestfile)" | tee "${GITHUB_OUTPUT}"
+
+          # create and push the :latest tag
+          if [ "${{ inputs.latest }}" == "true" ]; then
+            sudo podman image tag $PB_REGISTRY/$TARGET_IMAGE_NAME:$PB_TAG $PB_REGISTRY/$TARGET_IMAGE_NAME:latest
+            push $PB_REGISTRY/$TARGET_IMAGE_NAME:latest
+            push $PB_REGISTRY/$TARGET_IMAGE_NAME:latest
+          fi
+
+      - name: Sign with cosign
+        if: ${{ env.SIGNING_KEY != '' }}
+        run: |
+          cosign sign -y --new-bundle-format=false --use-signing-config=false --key env://SIGNING_KEY "$PB_REGISTRY/$TARGET_IMAGE_NAME@${{ steps.push.outputs.digest }}"

@@ -1,0 +1,64 @@
+name: images release
+permissions:
+  contents: write
+on:
+  workflow_dispatch:
+    inputs:
+      fedora_branch:
+        type: choice
+        description: fedora branch
+        required: true
+        options:
+          - '43'
+          - '44'
+          - 'rawhide'
+        default: '44'
+
+jobs:
+  create_release:
+    runs-on: ubuntu-26.04-arm
+    name: create release
+    outputs:
+      release_id: ${{ steps.create_release.outputs.id }}
+    steps:
+      - name: version
+        id: version
+        run: |
+          export full_version=$(skopeo inspect docker://quay.io/pocketblue/qualcomm-sdm845-phosh:${{ inputs.fedora_branch }} --format '{{ index .Labels "org.opencontainers.image.version" }}')
+          echo version=$(echo $full_version | cut -d. -f1-2) >> $GITHUB_OUTPUT
+      - uses: softprops/action-gh-release@v3
+        id: create_release
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          draft: true
+          body: |
+            Changelog:
+            - OCI images are now separated into 128 layers to optimize updates size
+            - Moved from bootc-image-builder to OSBuild image-builder
+            - Disk images now use default Fedora btrfs subvolumes
+            - Dropped the separate partition for `/boot`. Only 2 partitions are now required (ESP, root), `/boot` is now a subvolume
+            - Updated xiaomi-pipa kernel to 7.1.7
+            - Added DP audio support for xiaomi-pipa
+            - Fixed GNOME Mobile on rawhide
+            - User-friendlier flash scripts
+            - Various build optimizations
+            - Experimental support for Chunkah
+
+  images_build:
+    needs: create_release
+    strategy:
+      matrix:
+        device:
+          - qualcomm-sdm845
+          - xiaomi-nabu
+          - xiaomi-nabu-rodriguezst
+          - xiaomi-pipa
+          - xunlong-orangepi3-lts
+        desktop: [tty, gnome-desktop, plasma-desktop, plasma-mobile, phosh]
+    name: ${{ matrix.device }}-${{ matrix.desktop }}:${{ inputs.fedora_branch }}
+    uses: ./.github/workflows/images.yml
+    with:
+      device: ${{ matrix.device }}
+      desktop: ${{ matrix.desktop }}
+      tag: ${{ inputs.fedora_branch }}
+      release_id: ${{ needs.create_release.outputs.release_id }}

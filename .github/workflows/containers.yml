@@ -1,0 +1,126 @@
+name: containers
+on:
+  workflow_call:
+    inputs:
+      fedora_branch:
+        required: true
+        type: string
+      device:
+        type: string
+        required: false
+      desktop:
+        type: string
+        required: false
+      rechunker:
+        type: string
+        required: false
+        default: 'rpm-ostree'
+      target_tag_override:
+        type: string
+        required: false
+  workflow_dispatch:
+    inputs:
+      fedora_branch:
+        type: choice
+        description: 'fedora branch'
+        required: true
+        options:
+          - '43'
+          - '44'
+          - 'rawhide'
+        default: '44'
+      device:
+        type: choice
+        description: 'device'
+        required: true
+        options:
+          - 'qualcomm-sdm845'
+        default: 'all'
+      desktop:
+        type: choice
+        description: 'desktop'
+        required: true
+        options:
+          - 'all'
+          - 'tty'
+          - 'gnome-desktop'
+          - 'gnome-mobile'
+          - 'phosh'
+        default: 'all'
+      rechunker:
+        type: choice
+        description: 'rechunker'
+        required: true
+        options:
+          - 'rpm-ostree'
+          - 'chunkah'
+        default: 'rpm-ostree'
+      target_tag_override:
+        type: string
+        description: 'override target tag'
+        required: false
+
+run-name: >
+  containers:
+  fedora ${{ inputs.fedora_branch || 44 }}
+  ${{ inputs.device && inputs.device != 'all' && format(' | {0}', inputs.device) || '' }}
+  ${{ inputs.desktop && inputs.desktop != 'all' && format(' | {0}', inputs.desktop) || '' }}
+  ${{ github.event_name == 'push' && format(' | {0}', github.event.head_commit.message) || '' }}
+
+jobs:
+  config:
+    runs-on: ubuntu-26.04-arm
+    outputs:
+      target_tag: ${{ steps.config.outputs.target_tag }}
+      expires: ${{ steps.config.outputs.expires }}
+      latest: ${{ steps.config.outputs.latest }}
+      registry: ${{ steps.config.outputs.registry }}
+      devices: ${{ steps.config.outputs.devices }}
+    steps:
+      - name: config
+        id: config
+        uses: pocketblue/actions/container-config@main
+        with:
+          from_tag: ${{ inputs.fedora_branch || 44 }}
+          vars_registry: ${{ vars.REGISTRY }}
+          device: ${{ inputs.device || '' }}
+          device_list: |
+            qualcomm-sdm845
+
+  desktops:
+    runs-on: ubuntu-26.04-arm
+    outputs:
+      desktops: ${{ steps.desktops.outputs.desktops }}
+    steps:
+      - id: desktops
+        uses: pocketblue/actions/select-desktops@main
+        with:
+          desktop: ${{ inputs.desktop || '' }}
+          desktop_list: |
+            tty
+            gnome-desktop
+            gnome-mobile
+            phosh
+
+  build:
+    needs:
+      - config
+      - desktops
+    secrets: inherit
+    permissions:
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJson(needs.config.outputs.devices) }}
+        desktop: ${{ fromJson(needs.desktops.outputs.desktops) }}
+    uses: ./.github/workflows/helper-build-container.yml
+    with:
+      fedora_branch: ${{ inputs.fedora_branch || 44 }}
+      registry: ${{ needs.config.outputs.registry }}
+      device: ${{ matrix.device }}
+      desktop: ${{ matrix.desktop }}
+      tag: ${{ inputs.target_tag_override && inputs.target_tag_override || needs.config.outputs.target_tag }}
+      rechunker: ${{ inputs.rechunker }}
+      latest: ${{ needs.config.outputs.latest }}
+      expires: ${{ needs.config.outputs.expires }}

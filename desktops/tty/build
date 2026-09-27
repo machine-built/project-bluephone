@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+set -uexo pipefail
+
+dnf -y remove \
+    firefox \
+    firefox-langpacks

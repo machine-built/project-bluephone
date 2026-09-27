@@ -1,0 +1,163 @@
+name: images
+run-name: >
+  images: ${{ inputs.device }}
+  / fedora ${{ inputs.tag }}
+  ${{ inputs.desktop && inputs.desktop != 'all' && format(' / {0}', inputs.desktop) || '' }}
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        type: choice
+        description: 'device name'
+        required: true
+        options:
+          - qualcomm-sdm845
+      tag:
+        type: string
+        description: image tag
+        required: true
+        default: '44'
+      desktop:
+        type: choice
+        description: desktop
+        required: true
+        options:
+          - all
+          - tty
+          - gnome-desktop
+          - gnome-mobile
+          - phosh
+        default: all
+  workflow_call:
+    inputs:
+      device:
+        type: string
+        description: 'device name'
+        required: true
+      tag:
+        type: string
+        description: image tag
+        required: true
+      desktop:
+        type: string
+        description: desktop
+        required: true
+      release_id:
+        type: string
+        description: 'release id to upload the images to'
+        required: false
+
+jobs:
+  desktops:
+    runs-on: ubuntu-26.04-arm
+    outputs:
+      desktops: ${{ steps.desktops.outputs.desktops }}
+    steps:
+      - id: desktops
+        uses: pocketblue/actions/select-desktops@main
+        with:
+          desktop: ${{ inputs.desktop || '' }}
+          desktop_list: |
+            tty
+            gnome-desktop
+            gnome-mobile
+            phosh
+
+  images:
+    needs: desktops
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        desktop: ${{ fromJson(needs.desktops.outputs.desktops) }}
+    name: ${{ inputs.device }}-${{ matrix.desktop }}:${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get device config
+        id: conf
+        shell: bash
+        run: |
+          cat 'devices/${{ inputs.device }}/build-aux/device.conf' >> $GITHUB_OUTPUT
+
+      - name: Install erofs-utils
+        if: ${{ steps.conf.outputs.build_erofs == 'true' }}
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y erofs-utils
+
+      - name: Prepare environment
+        env:
+          IMAGE_REGISTRY: ${{ vars.REGISTRY || format('ghcr.io/{0}', github.repository_owner) }}
+        run: |
+          if [ -n "${{ inputs.release_id }}" ]; then
+            echo "PB_COMPRESSION_7Z=\"-mmt=1 -md=1500m\"" >> .env
+          fi
+
+          if [ -z "${{ steps.conf.outputs.device_variant }}" ]; then
+            echo "PB_TAG=${{ inputs.tag }}" >> .env
+            echo "PB_FULL_IMAGE=${IMAGE_REGISTRY,,}/${{ inputs.device }}-${{ matrix.desktop }}:${{ inputs.tag }}" >> .env
+          else
+            pb_tag="${{ inputs.tag }}-${{ steps.conf.outputs.device_variant }}"
+            echo "PB_TAG=$pb_tag" >> .env
+            echo "PB_FULL_IMAGE=${IMAGE_REGISTRY,,}/${{ steps.conf.outputs.device_base }}-${{ matrix.desktop }}:${pb_tag}" >> .env
+          fi
+
+          cat >> .env << EOF
+          PB_DEVICE=${{ inputs.device }}
+          PB_DESKTOP=${{ matrix.desktop }}
+          PB_REGISTRY=${IMAGE_REGISTRY,,}
+          EOF
+
+          cat .env >> $GITHUB_ENV
+
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: '1.46.0'
+
+      - name: Pull the container image
+        run: |
+          sudo podman pull $PB_FULL_IMAGE
+
+      - name: Build disk image
+        run: |
+          sudo $(which just) disk
+
+      - name: Post-process images
+        run: |
+          sudo $(which just) postprocess
+          sudo chown -R "$(id -u):$(id -g)" output/
+
+      - name: Collect artifacts
+        run: |
+          sudo rm -rf /run/user/$(id -u)/just
+          just artifacts
+
+          if [ -f "output/rootfs.ero" ]; then
+            mv "output/rootfs.ero" "rootfs-${{ steps.conf.outputs.device_base || env.PB_DEVICE }}-$PB_DESKTOP-$PB_TAG.ero"
+          fi
+
+          mv "pocketblue.7z" "pocketblue-${{ steps.conf.outputs.device_base || env.PB_DEVICE }}-$PB_DESKTOP-$PB_TAG.7z"
+
+      - name: Upload images archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: pocketblue-${{ steps.conf.outputs.device_base || env.PB_DEVICE }}-${{ env.PB_DESKTOP }}-${{ env.PB_TAG }}
+          path: pocketblue-${{ steps.conf.outputs.device_base || env.PB_DEVICE }}-${{ env.PB_DESKTOP }}-${{ env.PB_TAG }}.7z
+          archive: false
+
+      - name: Upload erofs image
+        uses: actions/upload-artifact@v7
+        with:
+          if-no-files-found: ignore
+          name: rootfs-${{ steps.conf.outputs.device_base || env.PB_DEVICE }}-${{ env.PB_DESKTOP }}-${{ env.PB_TAG }}
+          path: rootfs-${{ steps.conf.outputs.device_base || env.PB_DEVICE }}-${{ env.PB_DESKTOP }}-${{ env.PB_TAG }}.ero
+          archive: false
+
+      - name: Upload release artifacts
+        if: ${{ inputs.release_id }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          release_id: ${{ inputs.release_id }}
+          file: pocketblue-${{ steps.conf.outputs.device_base || env.PB_DEVICE }}-${{ env.PB_DESKTOP }}-${{ env.PB_TAG }}.7z

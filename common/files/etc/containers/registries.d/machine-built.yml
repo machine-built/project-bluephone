@@ -1,0 +1,3 @@
+docker:
+  ghcr.io/machine-built:
+    use-sigstore-attachments: true

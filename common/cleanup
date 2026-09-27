@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+set -uexo pipefail
+
+rm -rf /tmp/* || true
+rm -rf /var/lib/dnf || true
+rm -rf /var/log/dnf5.log || true
+rm -rf /boot/* || true
+rm -rf /boot/.* || true
